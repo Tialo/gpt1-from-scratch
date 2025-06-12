@@ -3,6 +3,7 @@ import json
 import math
 import random
 import argparse
+import time
 from functools import partial
 from typing import TYPE_CHECKING
 from dataclasses import dataclass
@@ -111,6 +112,19 @@ def _get_cosine_schedule_with_warmup_lr_lambda(
     return max(0.0, 0.5 * (1.0 + math.cos(math.pi * float(num_cycles) * 2.0 * progress)))
 
 
+def format_elapsed_time(seconds: float) -> str:
+    """Format elapsed time as HH:MM:SS if hours > 0, else MM:SS"""
+    total_seconds = int(seconds)
+    hours = total_seconds // 3600
+    minutes = (total_seconds % 3600) // 60
+    secs = total_seconds % 60
+    
+    if hours > 0:
+        return f"{hours:02d}:{minutes:02d}:{secs:02d}"
+    else:
+        return f"{minutes:02d}:{secs:02d}"
+
+
 def train_one_epoch(
     model,
     data_iterator,
@@ -130,9 +144,11 @@ def train_one_epoch(
     accumulated_loss = 0
     step_indices = []
     step_losses = []
-
+    
+    epoch_start_time = time.time()
     steps_digits = len(str(train_epoch_steps))
     print(f"Epoch: [{epoch_index + 1}/{n_epochs}]")
+    
     for batch_index, tokens in enumerate(data_iterator, 1):
         inputs = tokens[:, :-1].to(device)
         labels = tokens[:, 1:].to(device)
@@ -148,20 +164,17 @@ def train_one_epoch(
         loss.backward()
 
         if batch_index % accumulation_steps == 0 or batch_index == train_epoch_batches:
-            # log 20 times (5% of steps) per epoch
+            # log all steps
             step_index = batch_index // accumulation_steps
-            prev_percent = 100 * (step_index - 1) / train_epoch_steps
-            percent = 100 * step_index / train_epoch_steps
-            prev_threshold = int(prev_percent // 5)
-            current_threshold = int(percent // 5)
-            if current_threshold > prev_threshold or 1:
-                current_lr = scheduler.get_last_lr()[0]
-                print(
-                    f"Step: [{str(step_index).rjust(steps_digits)}/{train_epoch_steps}]",
-                    f"Step loss: {accumulated_loss:.4f}",
-                    f"lr: {current_lr:.2e}",
-                    sep=" | ",
-                )
+            current_lr = scheduler.get_last_lr()[0]
+            elapsed_time = time.time() - epoch_start_time
+            print(
+                f"Step: [{str(step_index).rjust(steps_digits)}/{train_epoch_steps}]",
+                f"Step loss: {accumulated_loss:.4f}",
+                f"lr: {current_lr:.2e}",
+                f"elapsed: {format_elapsed_time(elapsed_time)}",
+                sep=" | ",
+            )
             opt.step()
             opt.zero_grad()
             scheduler.step()
