@@ -1,9 +1,24 @@
+import os
+import json
+from dataclasses import dataclass, asdict
+
 import torch
 import torch.nn as nn
 
 
 def create_causal_mask(n: int):
     return torch.tril(torch.ones(n, n), diagonal=0).type(torch.uint8)
+
+
+@dataclass
+class GPTConfig:
+    vocab_size: int = 8192
+    hidden_size: int = 768
+    num_layers: int = 12
+    num_attention_heads: int = 12
+    intermediate_size: int = 3072
+    max_len: int = 512
+    dropout: float = 0.1
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -115,14 +130,18 @@ class Decoder(nn.Module):
 
 
 class GPT(nn.Module):
-    def __init__(self, vocab_size, hidden_size, num_layers, num_attention_heads, intermediate_size, max_len, dropout=0.1):
+    def __init__(
+        self,
+        config: GPTConfig,
+    ):
         super().__init__()
-        self.sqrt_model = hidden_size ** 0.5
-        self.decoder = Decoder(hidden_size, num_layers, num_attention_heads, intermediate_size, dropout)
-        self.embeddings = nn.Embedding(vocab_size, hidden_size)
-        self.positional_embeddings = nn.Embedding(max_len, hidden_size)
-        self.proj = nn.Linear(hidden_size, vocab_size)
-        self.dropout = nn.Dropout(p=dropout)
+        self.config = config
+        self.sqrt_model = config.hidden_size ** 0.5
+        self.decoder = Decoder(config.hidden_size, config.num_layers, config.num_attention_heads, config.intermediate_size, config.dropout)
+        self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.positional_embeddings = nn.Embedding(config.max_len, config.hidden_size)
+        self.proj = nn.Linear(config.hidden_size, config.vocab_size)
+        self.dropout = nn.Dropout(p=config.dropout)
 
         self.proj.weight = self.embeddings.weight
 
@@ -139,3 +158,17 @@ class GPT(nn.Module):
         if return_logits:
             x = self.proj(x)
         return x
+
+    def save_pretrained(self, save_path: str) -> None:
+        torch.save(self.state_dict(), os.path.join(save_path, "model.pt"))
+        with open(os.path.join(save_path, "config.json"), "w") as f:
+            json.dump(asdict(self.config), f, indent=2)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_path: str):
+        with open(os.path.join(pretrained_path, "config.json")) as f:
+            config = json.load(f)
+        model = cls(GPTConfig(**config))
+        state_dict = torch.load(os.path.join(pretrained_path, "model.pt"))
+        model.load_state_dict(state_dict)
+        return model
