@@ -17,14 +17,17 @@ class GPTConfig:
     num_layers: int = 12
     num_attention_heads: int = 12
     intermediate_size: int = 3072
-    max_len: int = 512
+    max_len: int = 128
     dropout: float = 0.1
 
 
 class ScaledDotProductAttention(nn.Module):
-    def __init__(self, dropout: float):
+    def __init__(self, max_len: int, dropout: float):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
+        # Create mask inside sdpa because attention is always
+        # used with causal mask in decoder-only transformer
+        self.register_buffer("causal_mask", create_causal_mask(max_len))
 
     def forward(self, q, k, v):
         """
@@ -36,9 +39,7 @@ class ScaledDotProductAttention(nn.Module):
         seq_len = k.size(-2)
         attn_weights = q @ k.transpose(-1, -2) / d_k ** 0.5  # (batch_size, n_head, seq_len, seq_len)
 
-        # Create mask inside sdpa because attention is always
-        # used with causal mask in decoder-only transformer
-        mask = create_causal_mask(seq_len)  # (seq_len, seq_len)
+        mask = self.causal_mask[:seq_len, :seq_len]  # (seq_len, seq_len)
         mask = mask.unsqueeze(0).unsqueeze(0)  # (1, 1, seq_len, seq_len)
         attn_weights = torch.masked_fill(attn_weights, mask == 0, float('-inf'))
         attn_probabilities = attn_weights.softmax(dim=-1)
@@ -46,7 +47,7 @@ class ScaledDotProductAttention(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, hidden_size, num_attention_heads, dropout=0.1):
+    def __init__(self, hidden_size, num_attention_heads, max_len, dropout):
         super().__init__()
 
         assert hidden_size % num_attention_heads == 0
@@ -59,7 +60,7 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size)
     
         self.proj = nn.Linear(hidden_size, hidden_size)
-        self.sdpa = ScaledDotProductAttention(dropout)
+        self.sdpa = ScaledDotProductAttention(max_len, dropout)
 
     def forward(self, x):
         """
@@ -73,7 +74,7 @@ class MultiHeadAttention(nn.Module):
         v = self.v_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
 
         sdpa = self.sdpa(q, k, v)  # (batch_size, n_head, seq_len, head_dim)
-        sdpa = sdpa.transpose(1, 2).contiguos().view(batch_size, seq_len, self.hidden_size)
+        sdpa = sdpa.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
         return self.proj(sdpa)  # (batch_size, seq_len, hidden_size)
 
 
@@ -90,6 +91,7 @@ class GELU(nn.Module):
 
 class FeedForwardNetwork(nn.Module):
     def __init__(self, hidden_size, intermediate_size):
+        super().__init__()
         self.ffn = nn.Sequential(
             nn.Linear(hidden_size, intermediate_size),
             GELU(),
@@ -101,9 +103,9 @@ class FeedForwardNetwork(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, hidden_size, num_attention_heads, intermediate_size, dropout=0.1):
+    def __init__(self, hidden_size, num_attention_heads, intermediate_size, max_len, dropout):
         super().__init__()
-        self.mha = MultiHeadAttention(hidden_size, num_attention_heads, dropout)
+        self.mha = MultiHeadAttention(hidden_size, num_attention_heads, max_len, dropout)
         self.ffn = FeedForwardNetwork(hidden_size, intermediate_size)
         self.layer_norm1 = nn.LayerNorm(hidden_size)
         self.layer_norm2 = nn.LayerNorm(hidden_size)
@@ -116,10 +118,10 @@ class DecoderLayer(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, hidden_size, num_layers, num_attention_heads, intermediate_size, dropout=0.1):
+    def __init__(self, hidden_size, num_layers, num_attention_heads, intermediate_size, max_len, dropout):
         super().__init__()
         self.decoder_layers = nn.ModuleList([
-            DecoderLayer(hidden_size, num_attention_heads, intermediate_size, dropout)
+            DecoderLayer(hidden_size, num_attention_heads, intermediate_size, max_len, dropout)
             for _ in range(num_layers)
         ])
 
@@ -137,7 +139,7 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.sqrt_model = config.hidden_size ** 0.5
-        self.decoder = Decoder(config.hidden_size, config.num_layers, config.num_attention_heads, config.intermediate_size, config.dropout)
+        self.decoder = Decoder(config.hidden_size, config.num_layers, config.num_attention_heads, config.intermediate_size, config.max_len, config.dropout)
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.positional_embeddings = nn.Embedding(config.max_len, config.hidden_size)
         self.proj = nn.Linear(config.hidden_size, config.vocab_size)
@@ -151,13 +153,14 @@ class GPT(nn.Module):
         """
         seq_len = x.size(1)
         embeddings = self.embeddings(x) * self.sqrt_model
-        pos_embeddings = self.positional_embeddings(torch.arange(seq_len))  # (seq_len, hidden_size)
+        pos_index = torch.arange(seq_len, device=x.device)
+        pos_embeddings = self.positional_embeddings(pos_index)  # (seq_len, hidden_size)
         embeddings += pos_embeddings.unsqueeze(0)
         embeddings = self.dropout(embeddings)
-        x = self.decoder(x)  # (batch_size, seq_len, hidden_size)
+        embeddings = self.decoder(embeddings)  # (batch_size, seq_len, hidden_size)
         if return_embeddings:
-            return x
-        return self.proj(x)  # (batch_size, seq_len, vocab_size)
+            return embeddings
+        return self.proj(embeddings)  # (batch_size, seq_len, vocab_size)
 
     def save_pretrained(self, save_path: str) -> None:
         torch.save(self.state_dict(), os.path.join(save_path, "model.pt"))

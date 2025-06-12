@@ -64,9 +64,7 @@ class Generator:
 
             # (n_beams - len(finished_beams), current_seq_len)
             batched_tokens_to_process = torch.tensor(tokens_to_process).to(tokens.device)  
-            top_tokens, proba = self._get_top_tokens(
-                batched_tokens_to_process, n_beams
-            )
+            top_tokens, proba = self._get_top_tokens(batched_tokens_to_process, n_beams)
             for active_beam_index in range(len(tokens_to_process)):
                 base_generated = tokens_to_process[active_beam_index]
                 base_probability = probabilities_to_process[active_beam_index]

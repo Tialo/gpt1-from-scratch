@@ -9,12 +9,12 @@ from tokenizers.processors import TemplateProcessing
 from tokenizers.decoders import BPEDecoder
 
 
-def build_tokenizer(train_data: list[str], max_len: int, save_path: str) -> Tokenizer:
+def build_tokenizer(train_data: list[str], vocab_size: int, max_len: int, save_path: str) -> Tokenizer:
     tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
     tokenizer.pre_tokenizer = Whitespace()
     tokenizer.normalizer = Sequence([NFKD(), StripAccents()])
     trainer = BpeTrainer(
-        vocab_size=8192,
+        vocab_size=vocab_size,
         min_frequency=2,
         # [SEP] used for Task-specific input transformations (3.3 in original paper)
         special_tokens=["[UNK]", "[PAD]", "[START]", "[END]", "[SEP]"],
@@ -37,8 +37,11 @@ def build_tokenizer(train_data: list[str], max_len: int, save_path: str) -> Toke
     return tokenizer
 
 
-def get_tokenizer(tokenizer_path: str) -> Tokenizer:
-    return Tokenizer.from_file(tokenizer_path)
+def get_tokenizer(tokenizer_path: str, max_len: int | None = None) -> Tokenizer:
+    tokenizer = Tokenizer.from_file(tokenizer_path)
+    if max_len is not None:
+        tokenizer.enable_truncation(max_len)
+    return tokenizer
 
 
 def decode(tokenizer: Tokenizer, sequence: list[int] | torch.Tensor) -> str:
