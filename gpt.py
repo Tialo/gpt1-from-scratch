@@ -145,7 +145,7 @@ class GPT(nn.Module):
 
         self.proj.weight = self.embeddings.weight
 
-    def forward(self, x, return_logits=True):
+    def forward(self, x, return_embeddings=False):
         """
         x - (batch_size, seq_len)
         """
@@ -155,9 +155,9 @@ class GPT(nn.Module):
         embeddings += pos_embeddings.unsqueeze(0)
         embeddings = self.dropout(embeddings)
         x = self.decoder(x)  # (batch_size, seq_len, hidden_size)
-        if return_logits:
-            x = self.proj(x)
-        return x
+        if return_embeddings:
+            return x
+        return self.proj(x)  # (batch_size, seq_len, vocab_size)
 
     def save_pretrained(self, save_path: str) -> None:
         torch.save(self.state_dict(), os.path.join(save_path, "model.pt"))
