@@ -13,6 +13,7 @@ class Generator:
         self, gpt: "GPT", sos_token_id: int, eos_token_id: int
     ):
         self.gpt = gpt
+        self.max_len = gpt.config.max_len
         self.sos_token_id = sos_token_id
         self.eos_token_id = eos_token_id
 
@@ -46,9 +47,12 @@ class Generator:
                 raise ValueError("batch_size > 1 is not supported...")
             tokens = tokens.squeeze(0)
 
+        tokens_until_max_len = self.max_len - len(tokens)
+        max_tokens = min(tokens_until_max_len, max_tokens)
+
         beams: list[tuple[list[int], float]] = [(tokens.tolist(), 0.0)]
 
-        for _ in range(max_tokens):  # current_seq_len
+        for _ in range(max_tokens):  # current_seq_len = len(tokens) + _
             candidate_beams = []
             tokens_to_process = []
             probabilities_to_process = []

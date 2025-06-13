@@ -4,11 +4,10 @@ import json
 import argparse
 from typing import TYPE_CHECKING
 
-import torch
 from datasets import load_dataset
 
 if TYPE_CHECKING:
-    from tokenizers import Tokenizer
+    from tokenizer_utils import Tokenizer
 
 
 def clean_text(text: str) -> str | None:
@@ -33,6 +32,7 @@ def download_data(save_path: str, data_samples: int | None = None, train_fractio
         print("Cleaning data")
     else:
         clean_text_f = lambda x: x
+
     dataset = [cleaned_text for sample in dataset if (cleaned_text := clean_text_f(sample["text"])) is not None]
     train_size = int(len(dataset) * train_fraction)
     train_data = dataset[:train_size]
@@ -51,8 +51,7 @@ def get_data_batch_iterator(
 ):
     for i in range(0, len(data), batch_size):
         batch_data = data[i : i + batch_size]
-        encoding = tokenizer.encode_batch(batch_data)
-        yield torch.tensor([b.ids for b in encoding])
+        yield tokenizer.encode(batch_data)
 
 
 if __name__ == "__main__":

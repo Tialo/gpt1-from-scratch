@@ -113,7 +113,10 @@ class DecoderLayer(nn.Module):
         self.dropout2 = nn.Dropout(p=dropout)
     
     def forward(self, x):
-        attention = self.layer_norm1(x + self.dropout1(self.mha(x)))
+        """
+        x - (batch_size, seq_len, hidden_size)
+        """
+        attention = self.layer_norm1(x + self.dropout1(self.mha(x)))  # (batch_size, seq_len, hidden_size)
         return self.layer_norm2(attention + self.dropout2(self.ffn(attention)))  # (batch_size, seq_len, hidden_size)
 
 
@@ -147,6 +150,39 @@ class GPT(nn.Module):
 
         self.proj.weight = self.embeddings.weight
 
+    # it does not match paper, but does match original implementation
+    # https://github.com/openai/finetune-transformer-lm/blob/master/train.py
+    def _init_params(self):
+        how_many_initialized = 0
+        # note: loop only for decoder parameters
+        for module in self.decoder.modules():
+            if isinstance(module, nn.Linear):
+                # a simple weight initialization of N (0, 0.02) was sufficient
+                nn.init.normal_(module.weight, mean=0, std=0.02)
+                how_many_initialized += module.weight.numel()
+                # not mentioned in the paper, but used in original implementation
+                nn.init.zeros_(module.bias)
+                how_many_initialized += module.bias.numel()
+            elif isinstance(module, nn.LayerNorm):
+                # not mentioned in the paper, but used in original implementation
+                nn.init.ones_(module.weight)
+                how_many_initialized += module.weight.numel()
+                nn.init.zeros_(module.bias)
+                how_many_initialized += module.bias.numel()
+            # skip high-level modules e.g. DecoderLayer, MultiHeadAttention etc
+            # also skip nn.Embedding, because Decoder doesn't have any
+        nn.init.ones_(self.embeddings.weight)
+        how_many_initialized += self.embeddings.weight.numel()
+        nn.init.ones_(self.positional_embeddings.weight)
+        how_many_initialized += self.positional_embeddings.weight.numel()
+        # note: don't initialize self.proj.weight
+        # because they are tied to self.embeddings.weight, so 
+        # they are already initialized.
+        nn.init.zeros_(self.proj.bias)
+        how_many_initialized += self.proj.bias.numel()
+        model_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        assert how_many_initialized == model_parameters
+
     def forward(self, x, return_embeddings=False):
         """
         x - (batch_size, seq_len)
@@ -175,3 +211,37 @@ class GPT(nn.Module):
         state_dict = torch.load(os.path.join(pretrained_path, "model.pt"))
         model.load_state_dict(state_dict)
         return model
+
+    def get_splitted_params_for_opt(self):
+        """
+        Splits parameters of model into 2 groups:
+            * Those which will be influenced by weight_decay
+            * Those which won't
+        
+        "We also employed a modified version of L2 regularization
+        proposed in https://arxiv.org/abs/1711.05101
+        with w = 0.01 on all non bias or gain weights."
+        (gain is layer_norm.weight)
+        """
+        decay_parameters = []
+        no_decay_parameters = []
+        # note: same logic as in _init_params
+        for module in self.decoder.modules():
+            if isinstance(module, nn.LayerNorm):
+                no_decay_parameters.append(module.weight)
+                no_decay_parameters.append(module.bias)
+            elif isinstance(module, nn.Linear):
+                decay_parameters.append(module.weight)
+                no_decay_parameters.append(module.bias)
+
+        decay_parameters.append(self.embeddings.weight)
+        decay_parameters.append(self.positional_embeddings.weight)
+        # note: same logic as in _init_params
+        no_decay_parameters.append(self.proj.bias)
+
+        n_decay_parameters = sum(p.numel() for p in decay_parameters)
+        n_no_decay_parameters = sum(p.numel() for p in no_decay_parameters)
+        model_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+
+        assert n_decay_parameters + n_no_decay_parameters == model_parameters
+        return no_decay_parameters, decay_parameters

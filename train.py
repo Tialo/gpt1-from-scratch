@@ -14,7 +14,7 @@ import numpy as np
 from generator import Generator
 from gpt import GPT
 from loss import LabelSmoothingLoss
-from tokenizer_utils import get_tokenizer, decode, build_tokenizer
+from tokenizer_utils import Tokenizer
 from data_utils import get_data_batch_iterator
 
 
@@ -30,10 +30,10 @@ class TrainConfig:
     data_fraction: float = 1.0
     batch_size: int = 64
     epochs: int = 1
-    base_lr: float = 2.5e-4
-    warmup_fraction: float = 0.1
-    accumulation_steps: int = 8
-    label_smoothing: float = 0.1 
+    base_lr: float = 1.5e-4
+    warmup_fraction: float = 0.06
+    accumulation_steps: int = 4
+    label_smoothing: float = 0.1
     seed: int = 42
 
 
@@ -71,9 +71,11 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
     warmup_steps = int(train_steps * config.warmup_fraction)
 
     if not os.path.isfile(config.tokenizer_path):
-        tokenizer = build_tokenizer(train_data, vocab_size=gpt_config.vocab_size, max_len=gpt_config.max_len, save_path=config.tokenizer_path)
+        tokenizer = Tokenizer.from_data(train_data, vocab_size=gpt_config.vocab_size, max_len=gpt_config.max_len)
+        tokenizer.save_pretrained(config.tokenizer_path)
     else:
-        tokenizer = get_tokenizer(config.tokenizer_path, gpt_config.max_len)
+        tokenizer = Tokenizer.from_pretrained(config.tokenizer_path)
+        tokenizer.change_max_len(gpt_config.max_len)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = GPT(gpt_config).to(device)
@@ -113,13 +115,12 @@ def _get_cosine_schedule_with_warmup_lr_lambda(
 
 
 def format_elapsed_time(seconds: float) -> str:
-    """Format elapsed time as HH:MM:SS if hours > 0, else MM:SS"""
     total_seconds = int(seconds)
     hours = total_seconds // 3600
     minutes = (total_seconds % 3600) // 60
     secs = total_seconds % 60
     
-    if hours > 0:
+    if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     else:
         return f"{minutes:02d}:{secs:02d}"
@@ -206,23 +207,16 @@ def validate_one_epoch(model, data_iterator, criterion, device):
 
 
 def cherry_pick_generation(val_data, tokenizer, generator, n_picks, device):
-    val_batch_iterator = get_data_batch_iterator(
-        val_data,
-        tokenizer,
-        batch_size=1,
-    )
     print("Cherry picked generations:")
-    for _ in range(n_picks):
-        src_tokens, tgt_tokens, _ = next(val_batch_iterator)
+    for i in range(n_picks):
+        tokens = tokenizer.encode(val_data[i], include_eos=False)
         generated = generator.generate(
-            src_tokens.to(device),
-            # 6.1 We set the maximum output length during inference to input length + 50, but terminate early when possible
-            max_tokens=len(src_tokens) + 50,
+            tokens.to(device),
+            max_tokens=len(tokens) + 50,
         )
         print(
-            f"Source:    {decode(tokenizer, src_tokens)}",
-            f"Target:    {decode(tokenizer, tgt_tokens)}",
-            f"Generated: {decode(tokenizer, generated)}\n",
+            f"Input:     {tokenizer.decode(tokens)}",
+            f"Generated: {tokenizer.decode(generated)}\n",
             sep="\n",
         )
 
@@ -254,8 +248,18 @@ def train_main(
         num_training_steps=train_epoch_steps * config.epochs,
         num_cycles=0.5,
     )
-    opt = torch.optim.Adam(
-        model.parameters(), lr=config.base_lr, betas=(0.9, 0.98), eps=1e-9
+    # We also employed a modified version of L2 regularization
+    # proposed in https://arxiv.org/abs/1711.05101
+    # with w = 0.01 on all non bias or gain weights.
+    no_decay_parameters, decay_parameters = model.get_splitted_params_for_opt()
+    opt = torch.optim.AdamW(
+        [
+            {"params": no_decay_parameters},
+            {"params": decay_parameters, "weight_decay": 0.01},
+        ],
+        lr=config.base_lr,
+        betas=(0.9, 0.98),
+        eps=1e-9,
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lr_lambda)
 
@@ -290,8 +294,10 @@ def train_main(
         epoch_train_losses.append(epoch_train_loss_avg)
         step_indices.extend(step_x)
         step_train_losses.extend(step_losses)
+        torch.cuda.empty_cache()
 
         cherry_pick_generation(val_data, tokenizer, generator, 4, device)
+        torch.cuda.empty_cache()
         print(f"\nTrain loss: {epoch_train_loss_avg:.4f}", end=" | ", flush=True)
         val_iterator = get_data_batch_iterator(
             val_data,
@@ -305,10 +311,9 @@ def train_main(
             device,
         )
         epoch_val_losses.append(epoch_val_loss_avg)
+        torch.cuda.empty_cache()
         print(f"Valid loss: {epoch_val_loss_avg:.4f}\n")
         print()
-
-        torch.cuda.empty_cache()
 
     os.mkdir(save_path)
     model.save_pretrained(save_path)
@@ -376,32 +381,32 @@ def parse_args():
     train_group.add_argument(
         "--data_fraction",
         type=float,
-        default=0.6,
-        help="Fraction of data used (default: 0.6)",
+        default=0.4,
+        help="Fraction of data used (default: 0.4)",
     )
     train_group.add_argument(
         "--batch_size",
         type=int,
-        default=64,
-        help="Batch size for training (default: 64)",
+        default=48,
+        help="Batch size for training (default: 48)",
     )
     train_group.add_argument(
         "--epochs", type=int, default=1, help="Number of training epochs (default: 1)"
     )
     train_group.add_argument(
-        "--base_lr", type=float, default=2.5e-4, help="Base learning rate (default: 2.5e-4)"
+        "--base_lr", type=float, default=1.5e-4, help="Base learning rate (default: 1.5e-4)"
     )
     train_group.add_argument(
         "--warmup_fraction",
         type=float,
-        default=0.1,
-        help="Fraction of training steps for warmup (default: 0.1)",
+        default=0.06,
+        help="Fraction of training steps for warmup (default: 0.06)",
     )
     train_group.add_argument(
         "--accumulation_steps",
         type=int,
-        default=8,
-        help="Gradient accumulation steps (default: 8)",
+        default=4,
+        help="Gradient accumulation steps (default: 4)",
     )
     train_group.add_argument(
         "--label_smoothing",
@@ -420,32 +425,32 @@ def parse_args():
     model_group.add_argument(
         "--hidden_size",
         type=int,
-        default=768,
-        help="Embedding dimension (default: 768)"
+        default=512,
+        help="Embedding dimension (default: 512)"
     )
     model_group.add_argument(
         "--num_layers",
         type=int,
-        default=12,
-        help="Number of decoder layers (default: 12)",
+        default=8,
+        help="Number of decoder layers (default: 8)",
     )
     model_group.add_argument(
         "--num_attention_heads",
         type=int,
-        default=12,
-        help="Number of attention heads in each decoder layers (default: 12)",
+        default=8,
+        help="Number of attention heads in each decoder layers (default: 8)",
     )
     model_group.add_argument(
         "--intermediate_size",
         type=int,
-        default=3072,
-        help="Feed-forward network dimension (default: 3072)",
+        default=2048,
+        help="Feed-forward network dimension (default: 2048)",
     )
     model_group.add_argument(
         "--max_len",
         type=int,
-        default=128,
-        help="Maximum sequence length (default: 128)",
+        default=256,
+        help="Maximum sequence length (default: 256)",
     )
     train_group.add_argument(
         "--dropout",
