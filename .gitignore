@@ -3,3 +3,4 @@ shards
 tokenizer.json
 __pycache__
 model
+log.txt

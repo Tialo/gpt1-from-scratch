@@ -52,7 +52,7 @@ class Tokenizer:
 
     def encode_pair(self, pair: list[tuple[str, str]] | tuple[str, str]) -> torch.Tensor:
         if isinstance(pair[0], str):
-            return torch.tensor(self.tokenizer.encode(pair[0], pair[1]))
+            return torch.tensor(self.tokenizer.encode(pair[0], pair[1]).ids)
         return torch.tensor([t.ids for t in self.tokenizer.encode_batch(pair)])
 
     def decode(self, sequence: list[int] | torch.Tensor, skip_special_tokens: bool = True) -> str:

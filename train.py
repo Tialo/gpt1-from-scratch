@@ -56,10 +56,10 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
     # just make less steps if data_fraction is not 1.0
     orig_train_epochs_steps = train_epoch_steps
     train_epoch_steps = int(train_epoch_steps * config.data_fraction)
-    print(f"{train_loader.n_batches:,} batches in train dataset")
-    print(f"{orig_train_epochs_steps:,} steps will could done during train")
-    print(f"{train_epoch_steps:,} steps will be done during train (after using data_fraction={config.data_fraction})")
-    print(f"{val_loader.n_batches:,} batches in val dataset")
+    log(f"{train_loader.n_batches:,} batches in train dataset")
+    log(f"{orig_train_epochs_steps:,} steps will could done during train")
+    log(f"{train_epoch_steps:,} steps will be done during train (after using data_fraction={config.data_fraction})")
+    log(f"{val_loader.n_batches:,} batches in val dataset")
 
     tokenizer = Tokenizer.from_pretrained("tokenizer.json")
 
@@ -68,7 +68,7 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
     if config.use_torch_compile:
         model = torch.compile(model)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Model with {n_params:,} parameters loaded.")
+    log(f"Model with {n_params:,} parameters loaded.")
     generator = Generator(
         model,
         tokenizer.token_to_id("[START]"),
@@ -131,7 +131,17 @@ def calculate_eval_loss(
             )
         val_loss += loss.item()
     return val_loss / val_batches
-    
+
+
+def log(*args, sep=None, end=None):
+    sep = sep or " "
+    end = end or "\n"
+    log_str = sep.join(args)
+    print(log_str, end=end)
+    with open("log.txt", "a") as f:
+        f.write(log_str)
+        f.write(end)
+
 
 def train_one_epoch(
     model,
@@ -165,13 +175,13 @@ def train_one_epoch(
                 device=device,
             )
             val_losses.append(val_loss)
-            print(
+            log(
                 f"Step: [{str(step_index + 1).rjust(steps_digits)}/{train_epoch_steps}]",
                 f"Validation loss: {val_loss:.4f}",
                 sep=" | ",
             )
         if step_index > 0 and step_index % 1000 == 0 or step_index + 1 == train_epoch_steps:
-            print(
+            log(
                 f"Step: [{str(step_index + 1).rjust(steps_digits)}/{train_epoch_steps}]",
                 "Generations:",
                 sep=" | "
@@ -183,7 +193,7 @@ def train_one_epoch(
                 encoded = tokenizer.encode(inputs, add_end_token=False).to(device)
                 generation = generator.generate(encoded, max_tokens=128, autocast=True)
                 decoded = tokenizer.decode(generation, skip_special_tokens=False)
-                print(
+                log(
                     f"Inputs: {inputs}",
                     f"Generated: {decoded}",
                     sep='\n'
@@ -214,7 +224,7 @@ def train_one_epoch(
         current_lr = scheduler.get_last_lr()[0]
         elapsed_time = accumulation_end_time - epoch_start_time
 
-        print(
+        log(
             f"Step: [{str(step_index + 1).rjust(steps_digits)}/{train_epoch_steps}]",
             f"Step loss: {accumulated_loss:.4f}",
             f"Grad norm: {grad_norm:.3f}",
@@ -277,7 +287,7 @@ def train_main(
     val_losses = []
 
     for e in range(config.epochs):
-        print(f"Epoch: [{e + 1}/{config.epochs}]")
+        log(f"Epoch: [{e + 1}/{config.epochs}]")
         e_step_losses, e_val_losses = train_one_epoch(
             model=model,
             train_loader=train_loader,
@@ -298,7 +308,7 @@ def train_main(
 
     os.mkdir(save_path)
     model.save_pretrained(save_path)
-    print(f"Model successfully saved at {save_path}!")
+    log(f"Model successfully saved at {save_path}!")
 
     return {
         "train_losses": step_losses,
@@ -358,8 +368,8 @@ def parse_args():
     train_group.add_argument(
         "--warmup_steps",
         type=int,
-        default=200,
-        help="Warmup steps (default: 200)",
+        default=100,
+        help="Warmup steps (default: 100)",
     )
     train_group.add_argument(
         "--accumulation_steps",
@@ -407,13 +417,13 @@ def parse_args():
         default=512,
         help="Maximum sequence length (default: 512)",
     )
-    train_group.add_argument(
+    model_group.add_argument(
         "--dropout",
         type=float,
         default=0.1,
         help="Dropout value (default: 0.1)",
     )
-    train_group.add_argument(
+    model_group.add_argument(
         "--disable_flash_attn",
         action="store_true",
     )

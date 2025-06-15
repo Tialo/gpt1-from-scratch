@@ -114,7 +114,7 @@ class DataLoader:
             self.n_batches += len(shard) // (self.batch_size * self.max_len + 1)
         self.shard = self._get_shard(self.shard_idx)
 
-    def _inc_shard_idx(self):
+    def _iter_shard_idx(self):
         # cyclic iteration over [0, 1, ..., len(self.shards) - 1]
         self.shard_idx = (self.shard_idx + 1) % len(self.shards)
 
@@ -132,8 +132,9 @@ class DataLoader:
         b, l = self.batch_size, self.max_len
         # drop all tokens from shard that don't fit into the batch
         if self.current_offset + b * l + 1 > len(self.shard):
-            self._inc_shard_idx()
+            self._iter_shard_idx()
             self.shard = self._get_shard(self.shard_idx)
+            self.current_offset = 0
         batch = self.shard[self.current_offset: self.current_offset + b * l + 1]
         self.current_offset += b * l + 1
         inputs = batch[:-1].view(b, l)
