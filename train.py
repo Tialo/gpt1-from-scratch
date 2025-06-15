@@ -65,7 +65,7 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = GPT(gpt_config).to(device)
-    if config.use_torch_compile and 0:
+    if config.use_torch_compile:
         model = torch.compile(model)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model with {n_params:,} parameters loaded.")
@@ -358,8 +358,8 @@ def parse_args():
     train_group.add_argument(
         "--warmup_steps",
         type=int,
-        default=1000,
-        help="Warmup steps (default: 1000)",
+        default=200,
+        help="Warmup steps (default: 200)",
     )
     train_group.add_argument(
         "--accumulation_steps",
