@@ -21,8 +21,6 @@ if TYPE_CHECKING:
     from gpt import GPTConfig
 
 
-# torch.set_float32_matmul_precision("high")
-
 @dataclass
 class TrainConfig:
     data_fraction: float = 1.0
@@ -67,7 +65,7 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = GPT(gpt_config).to(device)
-    if config.use_torch_compile:
+    if config.use_torch_compile and 0:
         model = torch.compile(model)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model with {n_params:,} parameters loaded.")
@@ -342,7 +340,7 @@ def parse_args():
     train_group.add_argument(
         "--data_fraction",
         type=float,
-        default=1,
+        default=0.33,
         help="Fraction of data used (default: 1)",
     )
     train_group.add_argument(

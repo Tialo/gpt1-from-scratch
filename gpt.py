@@ -149,7 +149,6 @@ class GPT(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.sqrt_model = config.hidden_size ** 0.5
         self.decoder = Decoder(config.hidden_size, config.num_layers, config.num_attention_heads, config.intermediate_size, config.max_len, config.dropout, config.use_flash_attn)
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.positional_embeddings = nn.Embedding(config.max_len, config.hidden_size)
@@ -157,6 +156,8 @@ class GPT(nn.Module):
         self.dropout = nn.Dropout(p=config.dropout)
 
         self.proj.weight = self.embeddings.weight
+
+        self._init_params()
 
     # matches original implementation
     # https://github.com/openai/finetune-transformer-lm/blob/master/train.py
@@ -197,7 +198,7 @@ class GPT(nn.Module):
         x - (batch_size, seq_len)
         """
         seq_len = x.size(1)
-        embeddings = self.embeddings(x) * self.sqrt_model
+        embeddings = self.embeddings(x)
         pos_index = torch.arange(seq_len, device=x.device)
         pos_embeddings = self.positional_embeddings(pos_index)  # (seq_len, hidden_size)
         embeddings += pos_embeddings.unsqueeze(0)
