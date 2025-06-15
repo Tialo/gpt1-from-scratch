@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from gpt import GPTConfig
 
 
+# torch.set_float32_matmul_precision("high")
+
 @dataclass
 class TrainConfig:
     data_fraction: float = 1.0
@@ -205,6 +207,7 @@ def train_one_epoch(
             loss.backward()
             accumulated_loss += loss.item()
 
+        grad_norm = nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         accumulation_end_time = time.time()
         accumulation_elapsed_time = accumulation_end_time - accumulation_start_time
         tokens_processed = accumulation_steps * train_loader.batch_size * train_loader.max_len
@@ -215,9 +218,10 @@ def train_one_epoch(
         print(
             f"Step: [{str(step_index + 1).rjust(steps_digits)}/{train_epoch_steps}]",
             f"Step loss: {accumulated_loss:.4f}",
+            f"Grad norm: {grad_norm:.3f}",
             f"lr: {current_lr:.3e}",
             f"elapsed: {format_elapsed_time(elapsed_time)}",
-            f"tokens/sec: {tokens_in_a_second:.3f}",
+            f"tokens/sec: {tokens_in_a_second:.2f}",
             sep=" | ",
         )
 
