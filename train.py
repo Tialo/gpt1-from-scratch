@@ -8,11 +8,11 @@ from typing import TYPE_CHECKING
 from dataclasses import dataclass
 
 import torch
+import torch.nn as nn
 import numpy as np
 
 from generator import Generator
 from gpt import GPT
-from loss import LabelSmoothingLoss
 from tokenizer_utils import Tokenizer
 from data_utils import DataLoader
 
@@ -29,7 +29,6 @@ class TrainConfig:
     base_lr: float = 2.5e-4
     warmup_fraction: float = 0.06
     accumulation_steps: int = 8
-    label_smoothing: float = 0.1
     seed: int = 42
 
 
@@ -74,9 +73,8 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
         tokenizer.token_to_id("[START]"),
         tokenizer.token_to_id("[END]"),
     )
-    criterion = LabelSmoothingLoss(
+    criterion = nn.CrossEntropyLoss(
         ignore_index=tokenizer.token_to_id("[PAD]"),
-        smoothing=config.label_smoothing,
     )
     return {
         "train_loader": train_loader,
@@ -312,7 +310,6 @@ def create_train_config_from_args(args) -> TrainConfig:
         base_lr=args.base_lr,
         warmup_fraction=args.warmup_fraction,
         accumulation_steps=args.accumulation_steps,
-        label_smoothing=args.label_smoothing,
         seed=args.seed,
     )
 
@@ -338,8 +335,8 @@ def parse_args():
     train_group.add_argument(
         "--data_fraction",
         type=float,
-        default=0.001,
-        help="Fraction of data used (default: 0.4)",
+        default=1,
+        help="Fraction of data used (default: 1)",
     )
     train_group.add_argument(
         "--batch_size",
@@ -348,7 +345,7 @@ def parse_args():
         help="Batch size for training (default: 8)",
     )
     train_group.add_argument(
-        "--epochs", type=int, default=2, help="Number of training epochs (default: 2)"
+        "--epochs", type=int, default=1, help="Number of training epochs (default: 1)"
     )
     train_group.add_argument(
         "--base_lr", type=float, default=2.5e-4, help="Base learning rate (default: 2.5e-4)"
@@ -364,12 +361,6 @@ def parse_args():
         type=int,
         default=8,
         help="Gradient accumulation steps (default: 8)",
-    )
-    train_group.add_argument(
-        "--label_smoothing",
-        type=float,
-        default=0.1,
-        help="Label smoothing factor (default: 0.1)",
     )
     train_group.add_argument(
         "--seed", type=int, default=42, help="Random seed (default: 42)"
