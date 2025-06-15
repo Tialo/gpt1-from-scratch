@@ -1,5 +1,5 @@
 venv
-data
+shards
 tokenizer.json
 __pycache__
 model

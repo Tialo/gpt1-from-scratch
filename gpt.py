@@ -12,12 +12,12 @@ def create_causal_mask(n: int):
 
 @dataclass
 class GPTConfig:
-    vocab_size: int = 8192
+    vocab_size: int = 32768
     hidden_size: int = 768
     num_layers: int = 12
     num_attention_heads: int = 12
     intermediate_size: int = 3072
-    max_len: int = 128
+    max_len: int = 512
     dropout: float = 0.1
 
 
@@ -150,7 +150,7 @@ class GPT(nn.Module):
 
         self.proj.weight = self.embeddings.weight
 
-    # it does not match paper, but does match original implementation
+    # matches original implementation
     # https://github.com/openai/finetune-transformer-lm/blob/master/train.py
     def _init_params(self):
         how_many_initialized = 0
@@ -171,19 +171,20 @@ class GPT(nn.Module):
                 how_many_initialized += module.bias.numel()
             # skip high-level modules e.g. DecoderLayer, MultiHeadAttention etc
             # also skip nn.Embedding, because Decoder doesn't have any
-        nn.init.ones_(self.embeddings.weight)
+        nn.init.normal_(self.embeddings.weight, mean=0, std=0.02)
         how_many_initialized += self.embeddings.weight.numel()
-        nn.init.ones_(self.positional_embeddings.weight)
+        nn.init.normal_(self.positional_embeddings.weight, mean=0, std=0.02)
         how_many_initialized += self.positional_embeddings.weight.numel()
         # note: don't initialize self.proj.weight
         # because they are tied to self.embeddings.weight, so 
         # they are already initialized.
         nn.init.zeros_(self.proj.bias)
         how_many_initialized += self.proj.bias.numel()
+
         model_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         assert how_many_initialized == model_parameters
 
-    def forward(self, x, return_embeddings=False):
+    def forward(self, x, return_embeddings: bool = False):
         """
         x - (batch_size, seq_len)
         """
