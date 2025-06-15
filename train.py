@@ -1,5 +1,4 @@
 import os
-import json
 import math
 import random
 import argparse
@@ -25,11 +24,11 @@ if TYPE_CHECKING:
 @dataclass
 class TrainConfig:
     data_fraction: float = 1.0
-    batch_size: int = 64
+    batch_size: int = 8
     epochs: int = 1
-    base_lr: float = 1.5e-4
+    base_lr: float = 2.5e-4
     warmup_fraction: float = 0.06
-    accumulation_steps: int = 4
+    accumulation_steps: int = 8
     label_smoothing: float = 0.1
     seed: int = 42
 
@@ -114,6 +113,28 @@ def format_elapsed_time(seconds: float) -> str:
         return f"{minutes:02d}:{secs:02d}"
 
 
+@torch.no_grad
+def calculate_eval_loss(
+    model,
+    val_loader: DataLoader,
+    val_batches: int,
+    criterion,
+    device,
+):
+    val_loss = 0
+    for _ in range(val_batches):
+        inputs, labels = val_loader.get_batch()
+        inputs = inputs.to(device)
+        labels = labels.to(device)
+        logits = model(inputs)
+        loss = criterion(
+            logits.view(-1, logits.size(-1)),
+            labels.view(-1),
+        )
+        val_loss += loss.item()
+    return val_loss / val_batches
+    
+
 def train_one_epoch(
     model,
     train_loader: DataLoader,
@@ -124,6 +145,8 @@ def train_one_epoch(
     criterion,
     opt,
     scheduler,
+    generator: Generator,
+    tokenizer: Tokenizer,
     device,
 ):
     step_losses = []
@@ -133,30 +156,40 @@ def train_one_epoch(
     steps_digits = len(str(train_epoch_steps))
 
     for step_index in range(train_epoch_steps):
-        if step_index % 100 == 0:
+        if step_index % 500 == 0 or step_index + 1 == train_epoch_steps:
             model.eval()
             torch.cuda.empty_cache()
-
-            val_loss = 0
-            with torch.no_grad():
-                for _ in range(val_batches):
-                    inputs, labels = val_loader.get_batch()
-                    inputs = inputs.to(device)
-                    labels = labels.to(device)
-                    logits = model(inputs)
-                    loss = criterion(
-                        logits.view(-1, logits.size(-1)),
-                        labels.view(-1),
-                    )
-                    val_loss += loss.item()
-            val_loss /= val_batches
+            val_loss = calculate_eval_loss(
+                model=model,
+                val_loader=val_loader,
+                val_batches=val_batches,
+                criterion=criterion,
+                device=device,
+            )
             val_losses.append(val_loss)
             print(
                 f"Step: [{str(step_index + 1).rjust(steps_digits)}/{train_epoch_steps}]",
                 f"Validation loss: {val_loss:.4f}",
                 sep=" | ",
             )
-            print()
+        if step_index > 0 and step_index % 1000 == 0 or step_index + 1 == train_epoch_steps:
+            print(
+                f"Step: [{str(step_index + 1).rjust(steps_digits)}/{train_epoch_steps}]",
+                "Generations:",
+                sep=" | "
+            )
+            for inputs in [
+                "Hello, my name is",
+                "I am a language model"
+            ]:
+                encoded = tokenizer.encode(inputs, add_end_token=False).to(device)
+                generation = generator.generate(encoded, max_tokens=128)
+                decoded = tokenizer.decode(generation, skip_special_tokens=False)
+                print(
+                    f"Inputs: {inputs}",
+                    f"Generated: {decoded}",
+                    sep='\n'
+                )
 
         model.train()
         accumulated_loss = 0
@@ -184,7 +217,7 @@ def train_one_epoch(
         print(
             f"Step: [{str(step_index + 1).rjust(steps_digits)}/{train_epoch_steps}]",
             f"Step loss: {accumulated_loss:.4f}",
-            f"lr: {current_lr:.2e}",
+            f"lr: {current_lr:.3e}",
             f"elapsed: {format_elapsed_time(elapsed_time)}",
             f"tokens/sec: {tokens_in_a_second:.3f}",
             sep=" | ",
@@ -213,7 +246,6 @@ def train_main(
     tokenizer = prep["tokenizer"]
     device = prep["device"]
     model = prep["model"]
-    # TODO: generate during train
     generator = prep["generator"]
     criterion = prep["criterion"]
 
@@ -255,14 +287,13 @@ def train_main(
             criterion=criterion,
             opt=opt,
             scheduler=scheduler,
+            generator=generator,
+            tokenizer=tokenizer,
             device=device,
         )
         step_losses.extend(e_step_losses)
         val_losses.extend(e_val_losses)
         torch.cuda.empty_cache()
-
-        torch.cuda.empty_cache()
-        print()
 
     os.mkdir(save_path)
     model.save_pretrained(save_path)
