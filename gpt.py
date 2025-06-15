@@ -4,6 +4,7 @@ from dataclasses import dataclass, asdict
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def create_causal_mask(n: int):
@@ -19,6 +20,7 @@ class GPTConfig:
     intermediate_size: int = 3072
     max_len: int = 512
     dropout: float = 0.1
+    use_flash_attn: bool = True
 
 
 class ScaledDotProductAttention(nn.Module):
@@ -47,7 +49,7 @@ class ScaledDotProductAttention(nn.Module):
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, hidden_size, num_attention_heads, max_len, dropout):
+    def __init__(self, hidden_size, num_attention_heads, max_len, dropout, use_flash_attn):
         super().__init__()
 
         assert hidden_size % num_attention_heads == 0
@@ -60,7 +62,10 @@ class MultiHeadAttention(nn.Module):
         self.v_proj = nn.Linear(hidden_size, hidden_size)
     
         self.proj = nn.Linear(hidden_size, hidden_size)
-        self.sdpa = ScaledDotProductAttention(max_len, dropout)
+
+        self.use_flash_attn = use_flash_attn
+        if not use_flash_attn:
+            self.sdpa = ScaledDotProductAttention(max_len, dropout)
 
     def forward(self, x):
         """
@@ -73,7 +78,10 @@ class MultiHeadAttention(nn.Module):
         k = self.k_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(batch_size, seq_len, self.n_head, self.head_dim).transpose(1, 2)
 
-        sdpa = self.sdpa(q, k, v)  # (batch_size, n_head, seq_len, head_dim)
+        if self.use_flash_attn:
+            sdpa = F.scaled_dot_product_attention(q, k, v, is_causal=True)  # (batch_size, n_head, seq_len, head_dim)
+        else:
+            sdpa = self.sdpa(q, k, v)  # (batch_size, n_head, seq_len, head_dim)
         sdpa = sdpa.transpose(1, 2).contiguous().view(batch_size, seq_len, self.hidden_size)
         return self.proj(sdpa)  # (batch_size, seq_len, hidden_size)
 
@@ -103,9 +111,9 @@ class FeedForwardNetwork(nn.Module):
 
 
 class DecoderLayer(nn.Module):
-    def __init__(self, hidden_size, num_attention_heads, intermediate_size, max_len, dropout):
+    def __init__(self, hidden_size, num_attention_heads, intermediate_size, max_len, dropout, use_flash_attn):
         super().__init__()
-        self.mha = MultiHeadAttention(hidden_size, num_attention_heads, max_len, dropout)
+        self.mha = MultiHeadAttention(hidden_size, num_attention_heads, max_len, dropout, use_flash_attn)
         self.ffn = FeedForwardNetwork(hidden_size, intermediate_size)
         self.layer_norm1 = nn.LayerNorm(hidden_size)
         self.layer_norm2 = nn.LayerNorm(hidden_size)
@@ -121,10 +129,10 @@ class DecoderLayer(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, hidden_size, num_layers, num_attention_heads, intermediate_size, max_len, dropout):
+    def __init__(self, hidden_size, num_layers, num_attention_heads, intermediate_size, max_len, dropout, use_flash_attn):
         super().__init__()
         self.decoder_layers = nn.ModuleList([
-            DecoderLayer(hidden_size, num_attention_heads, intermediate_size, max_len, dropout)
+            DecoderLayer(hidden_size, num_attention_heads, intermediate_size, max_len, dropout, use_flash_attn)
             for _ in range(num_layers)
         ])
 
@@ -142,7 +150,7 @@ class GPT(nn.Module):
         super().__init__()
         self.config = config
         self.sqrt_model = config.hidden_size ** 0.5
-        self.decoder = Decoder(config.hidden_size, config.num_layers, config.num_attention_heads, config.intermediate_size, config.max_len, config.dropout)
+        self.decoder = Decoder(config.hidden_size, config.num_layers, config.num_attention_heads, config.intermediate_size, config.max_len, config.dropout, config.use_flash_attn)
         self.embeddings = nn.Embedding(config.vocab_size, config.hidden_size)
         self.positional_embeddings = nn.Embedding(config.max_len, config.hidden_size)
         self.proj = nn.Linear(config.hidden_size, config.vocab_size)
@@ -157,7 +165,7 @@ class GPT(nn.Module):
         # note: loop only for decoder parameters
         for module in self.decoder.modules():
             if isinstance(module, nn.Linear):
-                # a simple weight initialization of N (0, 0.02) was sufficient
+                # (4.1) a simple weight initialization of N (0, 0.02) was sufficient
                 nn.init.normal_(module.weight, mean=0, std=0.02)
                 how_many_initialized += module.weight.numel()
                 # not mentioned in the paper, but used in original implementation

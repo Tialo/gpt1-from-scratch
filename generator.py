@@ -1,5 +1,6 @@
 import heapq
 from typing import TYPE_CHECKING
+from contextlib import nullcontext
 
 import torch
 
@@ -19,13 +20,19 @@ class Generator:
 
     @torch.no_grad
     def _get_top_tokens(
-        self, generated: torch.Tensor, n_beams: int
+        self, generated: torch.Tensor, n_beams: int, autocast: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         generated - (batch_size, current_seq_len)
         """
         # (batch_size, current_seq_len, vocab_size)
-        logits = self.gpt(generated)
+        context_kwargs = {}
+        context = nullcontext
+        if autocast:
+            context_kwargs = {"device_type": generated.device.type, "dtype": torch.bfloat16}
+            context = torch.autocast
+        with context(**context_kwargs):
+            logits = self.gpt(generated)
         logits = logits[:, -1]  # (batch_size, vocab_size, )
         token_probs = logits.log_softmax(dim=-1)
         top_tokens = torch.topk(token_probs, k=n_beams, sorted=False, dim=-1)
@@ -40,7 +47,7 @@ class Generator:
         return score * 6**alpha / (5 + len(tokens)) ** alpha
 
     def generate(
-        self, tokens: torch.Tensor, max_tokens: int = 20, n_beams: int = 5
+        self, tokens: torch.Tensor, max_tokens: int = 20, n_beams: int = 5, autocast: bool = False
     ) -> torch.Tensor:
         if tokens.dim() == 2:
             if tokens.size(0) != 1:
@@ -68,7 +75,7 @@ class Generator:
 
             # (n_beams - len(finished_beams), current_seq_len)
             batched_tokens_to_process = torch.tensor(tokens_to_process).to(tokens.device)  
-            top_tokens, proba = self._get_top_tokens(batched_tokens_to_process, n_beams)
+            top_tokens, proba = self._get_top_tokens(batched_tokens_to_process, n_beams, autocast=autocast)
             for active_beam_index in range(len(tokens_to_process)):
                 base_generated = tokens_to_process[active_beam_index]
                 base_probability = probabilities_to_process[active_beam_index]

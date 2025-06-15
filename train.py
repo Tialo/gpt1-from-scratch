@@ -29,8 +29,9 @@ class TrainConfig:
     batch_size: int = 8
     epochs: int = 1
     base_lr: float = 2.5e-4
-    warmup_fraction: float = 0.06
+    warmup_steps: int = 1000
     accumulation_steps: int = 8
+    use_torch_compile: bool = True
     seed: int = 42
 
 
@@ -57,8 +58,6 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
     # just make less steps if data_fraction is not 1.0
     orig_train_epochs_steps = train_epoch_steps
     train_epoch_steps = int(train_epoch_steps * config.data_fraction)
-    train_steps = train_epoch_steps * config.epochs
-    warmup_steps = int(train_steps * config.warmup_fraction)
     print(f"{train_loader.n_batches:,} batches in train dataset")
     print(f"{orig_train_epochs_steps:,} steps will could done during train")
     print(f"{train_epoch_steps:,} steps will be done during train (after using data_fraction={config.data_fraction})")
@@ -68,6 +67,8 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = GPT(gpt_config).to(device)
+    if config.use_torch_compile:
+        model = torch.compile(model)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"Model with {n_params:,} parameters loaded.")
     generator = Generator(
@@ -75,14 +76,12 @@ def prepare_training(config: TrainConfig, gpt_config: "GPTConfig"):
         tokenizer.token_to_id("[START]"),
         tokenizer.token_to_id("[END]"),
     )
-    criterion = nn.CrossEntropyLoss(
-        ignore_index=tokenizer.token_to_id("[PAD]"),
-    )
+    # don't use ignore_index, because no pads in train data
+    criterion = nn.CrossEntropyLoss()
     return {
         "train_loader": train_loader,
         "val_loader": val_loader,
         "train_epoch_steps": train_epoch_steps,
-        "warmup_steps": warmup_steps,
         "tokenizer": tokenizer,
         "device": device,
         "model": model,
@@ -126,11 +125,12 @@ def calculate_eval_loss(
         inputs, labels = val_loader.get_batch()
         inputs = inputs.to(device)
         labels = labels.to(device)
-        logits = model(inputs)
-        loss = criterion(
-            logits.view(-1, logits.size(-1)),
-            labels.view(-1),
-        )
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            logits = model(inputs)
+            loss = criterion(
+                logits.view(-1, logits.size(-1)),
+                labels.view(-1),
+            )
         val_loss += loss.item()
     return val_loss / val_batches
     
@@ -183,7 +183,7 @@ def train_one_epoch(
                 "I am a language model"
             ]:
                 encoded = tokenizer.encode(inputs, add_end_token=False).to(device)
-                generation = generator.generate(encoded, max_tokens=128)
+                generation = generator.generate(encoded, max_tokens=128, autocast=True)
                 decoded = tokenizer.decode(generation, skip_special_tokens=False)
                 print(
                     f"Inputs: {inputs}",
@@ -199,11 +199,12 @@ def train_one_epoch(
             inputs, labels = train_loader.get_batch()
             inputs = inputs.to(device)
             labels = labels.to(device)
-            logits = model(inputs)
-            loss = criterion(
-                logits.view(-1, logits.size(-1)),
-                labels.view(-1),
-            ) / accumulation_steps
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+                logits = model(inputs)
+                loss = criterion(
+                    logits.view(-1, logits.size(-1)),
+                    labels.view(-1),
+                ) / accumulation_steps
             loss.backward()
             accumulated_loss += loss.item()
 
@@ -244,7 +245,6 @@ def train_main(
     train_loader = prep["train_loader"]
     val_loader = prep["val_loader"]
     train_epoch_steps = prep["train_epoch_steps"]
-    warmup_steps = prep["warmup_steps"]
     tokenizer = prep["tokenizer"]
     device = prep["device"]
     model = prep["model"]
@@ -255,7 +255,7 @@ def train_main(
     # first 2000 updates and annealed to 0 using a cosine schedule
     lr_lambda = partial(
         _get_cosine_schedule_with_warmup_lr_lambda,
-        num_warmup_steps=warmup_steps,
+        num_warmup_steps=config.warmup_steps,
         num_training_steps=train_epoch_steps * config.epochs,
         num_cycles=0.5,
     )
@@ -271,6 +271,7 @@ def train_main(
         lr=config.base_lr,
         betas=(0.9, 0.999),
         eps=1e-8,
+        fused=True,
     )
     scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lr_lambda)
 
@@ -312,8 +313,9 @@ def create_train_config_from_args(args) -> TrainConfig:
         batch_size=args.batch_size,
         epochs=args.epochs,
         base_lr=args.base_lr,
-        warmup_fraction=args.warmup_fraction,
+        warmup_steps=args.warmup_steps,
         accumulation_steps=args.accumulation_steps,
+        use_torch_compile=not args.disable_torch_compile,
         seed=args.seed,
     )
 
@@ -329,6 +331,7 @@ def create_gpt_config_from_args(args, tokenizer) -> "GPTConfig":
         intermediate_size=args.intermediate_size,
         max_len=args.max_len,
         dropout=args.dropout,
+        use_flash_attn=not args.disable_flash_attn
     )
 
 
@@ -355,16 +358,21 @@ def parse_args():
         "--base_lr", type=float, default=2.5e-4, help="Base learning rate (default: 2.5e-4)"
     )
     train_group.add_argument(
-        "--warmup_fraction",
-        type=float,
-        default=0.06,
-        help="Fraction of training steps for warmup (default: 0.06)",
+        "--warmup_steps",
+        type=int,
+        default=1000,
+        help="Warmup steps (default: 1000)",
     )
     train_group.add_argument(
         "--accumulation_steps",
         type=int,
         default=8,
         help="Gradient accumulation steps (default: 8)",
+    )
+    train_group.add_argument(
+        "--disable_torch_compile",
+        action="store_true",
+        help="Disables model=torch.compile(model)"
     )
     train_group.add_argument(
         "--seed", type=int, default=42, help="Random seed (default: 42)"
@@ -406,6 +414,10 @@ def parse_args():
         type=float,
         default=0.1,
         help="Dropout value (default: 0.1)",
+    )
+    train_group.add_argument(
+        "--disable_flash_attn",
+        action="store_true",
     )
 
     parser.add_argument(
